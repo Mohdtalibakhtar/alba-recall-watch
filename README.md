@@ -97,8 +97,15 @@ See [`.env.example`](.env.example) for the placeholder reference.
    `carsFlagged` is now 0 and Slack gets the ✅ *all-clear* message instead. (To replay the
    full alert, clear the workflow's static data or edit a `stockId`.)
 
-A screenshot of a successful run is in [`screenshot-run.png`](screenshot-run.png) (all-green
-canvas) and the delivered Slack digest in [`screenshot-slack.png`](screenshot-slack.png).
+### Screenshots from a successful run
+
+**The workflow — every node green (manual run):**
+
+![n8n workflow, all nodes executed successfully](screenshot-run.png)
+
+**The delivered Slack digest in #new-channel** (real NHTSA recall counts + Claude briefing):
+
+![AlbaCars recall digest posted to Slack](screenshot-slack.png)
 
 ---
 
