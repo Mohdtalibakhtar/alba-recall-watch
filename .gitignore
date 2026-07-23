@@ -1,0 +1,8 @@
+# Never commit real secrets
+.env
+.env.local
+*.local
+
+# OS / editor junk
+.DS_Store
+Thumbs.db

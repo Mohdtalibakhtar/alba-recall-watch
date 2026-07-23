@@ -1,0 +1,235 @@
+{
+  "name": "AlbaCars — Recall & Safety Watch",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "a1111111-1111-4111-8111-111111111111",
+      "name": "Run manually",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-160, 200]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7 * * *"
+            }
+          ]
+        }
+      },
+      "id": "a2222222-2222-4222-8222-222222222222",
+      "name": "Every morning 07:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-160, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// SAMPLE dealer inventory — clearly illustrative.\n// In production this node is replaced by a Supabase/Postgres read of the\n// AlbaScope Inventory `cars` table (Assignment 2). The rest of the workflow\n// is identical either way.\nconst inventory = [\n  { stockId: 'ALB-001', vin: '4T1BF1FK5CU513331', make: 'Toyota',    model: 'Camry',           year: 2012 },\n  { stockId: 'ALB-002', vin: '1HGCR2F30DA000000', make: 'Honda',     model: 'Accord',          year: 2013 },\n  { stockId: 'ALB-003', vin: '1FMCU0GX7DUA00000', make: 'Ford',      model: 'Escape',          year: 2013 },\n  { stockId: 'ALB-004', vin: '1N4AL3AP0DC000000', make: 'Nissan',    model: 'Altima',          year: 2013 },\n  { stockId: 'ALB-005', vin: '5XXGM4A70DG000000', make: 'Kia',       model: 'Optima',          year: 2013 },\n  { stockId: 'ALB-006', vin: '5NPE24AF5FH000000', make: 'Hyundai',   model: 'Sonata',          year: 2015 },\n  { stockId: 'ALB-007', vin: '1C4RJFAG0EC000000', make: 'Jeep',      model: 'Grand Cherokee',  year: 2014 }\n];\nreturn inventory.map((car) => ({ json: car }));"
+      },
+      "id": "a3333333-3333-4333-8333-333333333333",
+      "name": "Load dealer inventory",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [80, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/{{ $json.vin }}?format=json",
+        "options": {}
+      },
+      "id": "a4444444-4444-4444-8444-444444444444",
+      "name": "Decode VIN (vPIC)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [300, 300],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// vPIC returns { Results: [ {Variable, Value}, ... ] }.\n// This is enrichment (body/engine/plant). It degrades gracefully if the VIN\n// is unknown — the recall query below always uses the dealer's own\n// make/model/year, so a bad VIN never breaks the run.\nconst src = $('Load dealer inventory').item.json;\nconst decoded = $json || {};\nconst results = Array.isArray(decoded.Results) ? decoded.Results : [];\n\nfunction pick(variable) {\n  const row = results.find((r) => r.Variable === variable);\n  const v = row ? row.Value : null;\n  return v && v !== 'Not Applicable' && v !== '' ? v : null;\n}\n\nconst decodedMake = pick('Make');\n\nreturn {\n  json: {\n    ...src,\n    decode: {\n      ok: !!decodedMake,\n      decodedMake,\n      bodyClass: pick('Body Class'),\n      engineL: pick('Displacement (L)'),\n      plantCountry: pick('Plant Country')\n    }\n  }\n};"
+      },
+      "id": "a5555555-5555-4555-8555-555555555555",
+      "name": "Parse VIN decode",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [520, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.nhtsa.gov/recalls/recallsByVehicle?make={{ $json.make }}&model={{ $json.model }}&modelYear={{ $json.year }}",
+        "options": {}
+      },
+      "id": "a6666666-6666-4666-8666-666666666666",
+      "name": "Get recalls (NHTSA)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [740, 300],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Aggregate every car into ONE report item, and apply idempotency using\n// n8n workflow static data so re-runs don't re-alert on the same campaigns.\nconst recallItems = $input.all();\nconst carItems = $('Parse VIN decode').all();\n\nconst staticData = $getWorkflowStaticData('global');\nconst alerted = staticData.alertedCampaigns || {};\n\nconst flagged = [];\nconst allCars = [];\nlet totalOpenRecalls = 0;\nlet totalNewRecalls = 0;\nlet cleanCount = 0;\n\nfor (let i = 0; i < recallItems.length; i++) {\n  const car = carItems[i] ? carItems[i].json : {};\n  const resp = recallItems[i] ? recallItems[i].json : {};\n  const list = Array.isArray(resp.results) ? resp.results : [];\n\n  const recalls = list.map((r) => ({\n    campaign: r.NHTSACampaignNumber || null,\n    component: r.Component || 'Unknown',\n    summary: r.Summary || '',\n    consequence: r.Consequence || '',\n    remedy: r.Remedy || '',\n    date: r.ReportReceivedDate || ''\n  }));\n\n  const count = recalls.length;\n  totalOpenRecalls += count;\n  if (count === 0) cleanCount++;\n\n  const key = car.stockId || car.vin || String(i);\n  const seen = alerted[key] || [];\n  const newRecalls = recalls.filter((r) => r.campaign && !seen.includes(r.campaign));\n  totalNewRecalls += newRecalls.length;\n\n  const record = {\n    stockId: car.stockId,\n    vin: car.vin,\n    make: car.make,\n    model: car.model,\n    year: car.year,\n    bodyClass: car.decode ? car.decode.bodyClass : null,\n    recallCount: count,\n    newRecallCount: newRecalls.length,\n    recalls,\n    newRecalls\n  };\n  allCars.push(record);\n  if (newRecalls.length > 0) flagged.push(record);\n\n  alerted[key] = Array.from(new Set([...seen, ...recalls.map((r) => r.campaign).filter(Boolean)]));\n}\n\nstaticData.alertedCampaigns = alerted;\n\nconst generatedAt = $now.toISO();\n\nconst lines = flagged.map((c) => {\n  const rl = c.newRecalls\n    .map((r) => `   - [${r.campaign}] ${r.component}: ${String(r.summary).slice(0, 220)}`)\n    .join('\\n');\n  return `- ${c.year} ${c.make} ${c.model} (stock ${c.stockId}, VIN ${c.vin}) — ${c.newRecallCount} open recall(s):\\n${rl}`;\n}).join('\\n\\n');\n\nconst llmPrompt = `Here is today's open-recall scan of a used-car dealership's inventory. Write a concise morning briefing for the sales team (max ~180 words). For each affected car give a one-line plain-English risk and what to tell a prospective buyer. Be factual and calm — no fear-mongering.\\n\\nScan date: ${generatedAt}\\nCars scanned: ${recallItems.length} | Flagged (new recalls): ${flagged.length} | Clean: ${cleanCount}\\n\\n${lines}`;\n\nconst report = {\n  generatedAt,\n  totalCars: recallItems.length,\n  carsFlagged: flagged.length,\n  cleanCount,\n  totalOpenRecalls,\n  totalNewRecalls,\n  flagged,\n  allCars,\n  llmPrompt\n};\n\nreturn [{ json: report }];"
+      },
+      "id": "a7777777-7777-4777-8777-777777777777",
+      "name": "Compile recall report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [960, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-new-recalls",
+              "leftValue": "={{ $json.carsFlagged }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a8888888-8888-4888-8888-888888888888",
+      "name": "Any new recalls?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1180, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"model\": \"claude-sonnet-5\", \"max_tokens\": 700, \"system\": \"You are AlbaCars' inventory safety analyst. You write short, factual internal briefings for a used-car sales team.\", \"messages\": [ { \"role\": \"user\", \"content\": $json.llmPrompt } ] } }}",
+        "options": {}
+      },
+      "id": "a9999999-9999-4999-8999-999999999999",
+      "name": "Anthropic — write briefing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1400, 180],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the Slack digest text from the LLM briefing + structured fallback.\nconst report = $('Compile recall report').first().json;\nconst llm = $json || {};\n\nlet briefing = '';\ntry {\n  briefing = llm.content && llm.content[0] && llm.content[0].text ? llm.content[0].text : '';\n} catch (e) {\n  briefing = '';\n}\nif (!briefing) briefing = '(LLM briefing unavailable — see the structured list below.)';\n\nconst flaggedLines = report.flagged\n  .map((c) => `• *${c.year} ${c.make} ${c.model}* (stock ${c.stockId}) — ${c.newRecallCount} open recall(s)`)\n  .join('\\n');\n\nconst text = `:car: *AlbaCars — Daily Recall & Safety Watch*\\n` +\n  `${report.totalCars} cars scanned · *${report.carsFlagged} flagged* · ${report.cleanCount} clean · ${String(report.generatedAt).slice(0, 10)}\\n\\n` +\n  `${briefing}\\n\\n*Affected inventory:*\\n${flaggedLines}`;\n\nreturn [{ json: { slackText: text } }];"
+      },
+      "id": "aaaa1111-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "name": "Format digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1620, 180]
+    },
+    {
+      "parameters": {
+        "jsCode": "// No new recalls today — post a short all-clear.\nconst report = $('Compile recall report').first().json;\nconst text = `:white_check_mark: *AlbaCars — Daily Recall & Safety Watch*\\n` +\n  `${report.totalCars} cars scanned · no *new* open recalls today · ${String(report.generatedAt).slice(0, 10)}.\\n` +\n  `(${report.totalOpenRecalls} previously-known recall(s) already on file.)`;\nreturn [{ json: { slackText: text } }];"
+      },
+      "id": "aaaa2222-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "name": "Format all-clear",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1400, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://hooks.slack.com/services/REPLACE/WITH/YOUR-WEBHOOK",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"text\": $json.slackText } }}",
+        "options": {}
+      },
+      "id": "aaaa3333-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "name": "Slack — post",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1840, 300],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    }
+  ],
+  "connections": {
+    "Run manually": {
+      "main": [[{ "node": "Load dealer inventory", "type": "main", "index": 0 }]]
+    },
+    "Every morning 07:00": {
+      "main": [[{ "node": "Load dealer inventory", "type": "main", "index": 0 }]]
+    },
+    "Load dealer inventory": {
+      "main": [[{ "node": "Decode VIN (vPIC)", "type": "main", "index": 0 }]]
+    },
+    "Decode VIN (vPIC)": {
+      "main": [[{ "node": "Parse VIN decode", "type": "main", "index": 0 }]]
+    },
+    "Parse VIN decode": {
+      "main": [[{ "node": "Get recalls (NHTSA)", "type": "main", "index": 0 }]]
+    },
+    "Get recalls (NHTSA)": {
+      "main": [[{ "node": "Compile recall report", "type": "main", "index": 0 }]]
+    },
+    "Compile recall report": {
+      "main": [[{ "node": "Any new recalls?", "type": "main", "index": 0 }]]
+    },
+    "Any new recalls?": {
+      "main": [
+        [{ "node": "Anthropic — write briefing", "type": "main", "index": 0 }],
+        [{ "node": "Format all-clear", "type": "main", "index": 0 }]
+      ]
+    },
+    "Anthropic — write briefing": {
+      "main": [[{ "node": "Format digest", "type": "main", "index": 0 }]]
+    },
+    "Format digest": {
+      "main": [[{ "node": "Slack — post", "type": "main", "index": 0 }]]
+    },
+    "Format all-clear": {
+      "main": [[{ "node": "Slack — post", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
