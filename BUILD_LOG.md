@@ -13,7 +13,7 @@
   (the LLM briefing), Slack Incoming Webhook (delivery).
 - Workflow authored as JSON and imported (precise + reviewable), not click-built.
 - **AI tooling:** **ChatGPT** for ideation and scoping → workflow designed, authored (JSON), and
-  verified in **Claude Code** (live NHTSA calls tested before shipping). Reviewed by hand.
+  verified in **Claude Code** (live NHTSA calls tested before shipping).
 
 ## Key decisions & trade-offs
 - **Sample inventory in a Code node**, clearly labelled, instead of reading the live Supabase
